@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'SecurityBaseline Stack for AlertAggregator.'
+
+Parameters:
+  EmailAddress:
+    Type: String
+
+  SourceName:
+    Type: String
+    Default: "com.hmddev.aggregator"
+
+  ParameterPrefix:
+    Type: String
+    Default: "security-hub-aggregator"
+    Description: "Prefix to be used in names of the things created by this stack."
+
+Resources:
+  SnsTopic:
+    Type: AWS::SNS::Topic
+
+  EventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "states.amazonaws.com"
+            Action: "sns:Publish"
+            Resource: "*"
+      Topics:
+        - !Ref SnsTopic
+
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: SnsTopic
+    Properties:
+      Endpoint: !Ref EmailAddress
+      Protocol: "email"
+      TopicArn: !Ref SnsTopic
+
+  CentralEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub "${ParameterPrefix}-CentralEventBus"
+
+  CentralEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties: 
+      StatementId: "allow_account_to_put_events"
+      EventBusName: !Ref CentralEventBus
+      Statement: 
+        Effect: "Allow"
+        Action: "events:PutEvents"
+        Principal:
+          AWS: 
+            - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+        Resource: !GetAtt CentralEventBus.Arn
+
+  AlertAggregatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 90
+      LogGroupName: !Sub "/aws/states/${ParameterPrefix}-AlertAggregator"
+
+  AlertAggregator:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/aggregator.asl.yaml
+      DefinitionSubstitutions:
+        CentralEventBusName: !Ref CentralEventBus
+        SourceName: !Ref SourceName
+      Policies:
+        - AWSXRayDaemonWriteAccess
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref CentralEventBus
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogDelivery'
+                - 'logs:GetLogDelivery'
+                - 'logs:UpdateLogDelivery'
+                - 'logs:DeleteLogDelivery'
+                - 'logs:ListLogDeliveries'
+                - 'logs:PutResourcePolicy'
+                - 'logs:DescribeResourcePolicies'
+                - 'logs:DescribeLogGroups'
+                - 'cloudwatch:PutMetricData'
+                - 'securityhub:BatchUpdateFindings'
+              Resource: '*'
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt  AlertAggregatorLogGroup.Arn
+        Level: ALL
+        IncludeExecutionData: True
+      Tracing:
+        Enabled: True
+      Events:
+        Rule1:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.securityhub
+              detail-type:
+                - Security Hub Findings - Imported
+              detail:
+                findings:
+                  Compliance:
+                    Status:
+                      - FAILED
+                  Workflow:
+                    Status:
+                      - NEW
+        Rule2:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref CentralEventBus
+            Pattern:
+              source:
+                - aws.trustedadvisor
+
+  SendMessageLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 90
+      LogGroupName: !Sub "/aws/states/${ParameterPrefix}-send-message"
+
+  SendMessage:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/mailer.asl.yaml
+      DefinitionSubstitutions:
+        CentralEventBusName: !Ref CentralEventBus
+        SnsTopic: !Ref SnsTopic
+      Policies:
+        - AWSXRayDaemonWriteAccess
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogDelivery'
+                - 'logs:GetLogDelivery'
+                - 'logs:UpdateLogDelivery'
+                - 'logs:DeleteLogDelivery'
+                - 'logs:ListLogDeliveries'
+                - 'logs:PutResourcePolicy'
+                - 'logs:DescribeResourcePolicies'
+                - 'logs:DescribeLogGroups'
+                - 'cloudwatch:PutMetricData'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 'sns:Publish'
+              Resource: !Ref SnsTopic
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt  SendMessageLogGroup.Arn
+        Level: ALL
+        IncludeExecutionData: True
+      Tracing:
+        Enabled: True
+      Events:
+        Rule1:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref CentralEventBus
+            Pattern:
+              source:
+                  - !Ref SourceName

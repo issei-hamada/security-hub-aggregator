@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# AWS
+.aws-sam/
+samconfig.toml
+
 # C extensions
 *.so
 

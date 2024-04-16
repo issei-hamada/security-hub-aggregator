@@ -1,0 +1,133 @@
+---
+Comment: A description of my state machine
+StartAt: Choice Source
+States:
+  Choice Source:
+    Type: Choice
+    Choices:
+    - Variable: "$.source"
+      StringEquals: aws.securityhub
+      Next: Choice ProductName
+    - Variable: "$.source"
+      StringEquals: aws.trustedadvisor
+      Next: Choice
+    Default: Pass
+  Choice ProductName:
+    Type: Choice
+    Choices:
+    - Variable: "$.detail.findings[0].ProductName"
+      StringEquals: GuardDuty
+      Next: Choice Severity
+    - Variable: "$.detail.findings[0].ProductName"
+      StringEquals: Security Hub
+      Next: SecurityHub Format
+    - Variable: "$.detail.findings[0].ProductName "
+      StringEquals: IAM Access Analyzer
+      Next: AccessAnalyzer Format
+    Default: Pass
+  Choice Severity:
+    Type: Choice
+    Choices:
+    - Variable: "$.detail.findings[0].Severity.Normalized"
+      NumericGreaterThanEquals: 70
+      Next: GuardDuty Format
+    Default: Pass
+  GuardDuty Format:
+    Type: Pass
+    Parameters:
+      Subject.$: 'States.Format(''緊急度: {} GuardDutyセキュリティアラート Account: {}'', $.detail.findings[0].Severity.Label,
+        $.detail.findings[0].AwsAccountId)'
+      Message.$: |-
+        States.Format('以下の脅威を検知しました。
+        状況を確認してください。
+        初回検知: {}
+        更新日時: {}
+        検知タイプ: {}
+        詳細: {}
+        リージョン: {}
+        リソース: {}
+        推奨対応URL: https://docs.aws.amazon.com/ja_jp/guardduty/latest/ug/guardduty_finding-types-active.html',$.detail.findings[0].CreatedAt,$.detail.findings[0].UpdatedAt,$.detail.findings[0].Types[0], $.detail.findings[0].Description, $.detail.findings[0].Region,$.detail.findings[0].Resources[0].Id)
+    Next: BatchUpdateFindings
+    ResultPath: "$.Format"
+  BatchUpdateFindings:
+    Type: Task
+    Next: PutEvents
+    Parameters:
+      FindingIdentifiers:
+      - Id.$: "$.detail.findings[0].Id"
+        ProductArn.$: "$.detail.findings[0].ProductArn"
+      Workflow:
+        Status: NOTIFIED
+    Resource: arn:aws:states:::aws-sdk:securityhub:batchUpdateFindings
+    ResultPath: "$.BatchUpdateFindings"
+    Retry:
+    - ErrorEquals:
+      - States.ALL
+      BackoffRate: 1
+      IntervalSeconds: 5
+      MaxAttempts: 2
+  PutEvents:
+    Type: Task
+    Parameters:
+      Entries:
+      - Detail:
+          Subject.$: "$.Format.Subject"
+          Message.$: "$.Format.Message"
+        EventBusName: '${CentralEventBusName}'
+        DetailType: Alart Aggregator
+        Source: '${SourceName}'
+    Resource: arn:aws:states:::aws-sdk:eventbridge:putEvents
+    ResultPath: "$.PutEvents"
+    End: true
+  Pass:
+    Type: Pass
+    End: true
+  SecurityHub Format:
+    Type: Pass
+    Parameters:
+      Subject.$: 'States.Format(''緊急度: {} SecurityHubセキュリティアラート Account: {}'', $.detail.findings[0].Severity.Label,
+        $.detail.findings[0].AwsAccountId)'
+      Message.$: |-
+        States.Format('以下のベストプラクティス違反を検知しました。
+        意図したものであるか確認してください。
+        初回検知: {}
+        更新日時: {}
+        詳細: {}
+        リージョン: {}
+        リソース: {}
+        推奨対応: {}
+        推奨対応URL: {}',$.detail.findings[0].CreatedAt,$.detail.findings[0].LastObservedAt,$.detail.findings[0].Title, $.detail.findings[0].Region, $.detail.findings[0].Resources[0].Id, $.detail.findings[0].Remediation.Recommendation.Text, $.detail.findings[0].Remediation.Recommendation.Url)
+    Next: BatchUpdateFindings
+    ResultPath: "$.Format"
+  AccessAnalyzer Format:
+    Type: Pass
+    Parameters:
+      Subject.$: 'States.Format(''IAM Access Analyzerセキュリティアラート Account: {} リソース種類:
+        {}'', $.detail.accountId, $.detail.resourceType)'
+      Message.$: |-
+        States.Format('以下リソースが外部共有されています。
+        意図した設定か確認してください。
+        リソース種類: {}
+        リソース名: {}
+        リージョン: {}
+        プリンシパル: {}', $.detail.resourceType, $.detail.resource, $.detail.region, $.detail.principal)
+    Next: BatchUpdateFindings
+    ResultPath: "$.Format"
+  Choice:
+    Type: Choice
+    Choices:
+    - Variable: "$.detail.check-name"
+      StringEquals: Exposed Access Keys
+      Next: ExposedKey Format
+    Default: Pass
+  ExposedKey Format:
+    Type: Pass
+    Parameters:
+      Subject.$: 'States.Format(''緊急 Exposed AccessKeyアラート Account: {}'', $.account)'
+      Message.$: |-
+        States.Format('アクセスキーの漏出を検知しました。
+        至急削除し、AWSサポートに報告して下さい。
+        User Name: {}
+        Access Key ID: {}
+        Location: {}', $['detail']['check-item-detai']['User Name (IAM or Root)'], $['detail']['check-item-detai']['Access Key ID'],  $['detail']['check-item-detai']['Location'])
+    Next: PutEvents

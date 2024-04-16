@@ -1,0 +1,12 @@
+---
+Comment: A description of my state machine
+StartAt: SNS Publish
+States:
+  SNS Publish:
+    Type: Task
+    Resource: arn:aws:states:::aws-sdk:sns:publish
+    Parameters:
+      TopicArn: '${SnsTopic}'
+      Message.$: "$.detail.Message"
+      Subject.$: "$.detail.Subject"
+    End: true
